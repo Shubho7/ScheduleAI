@@ -48,15 +48,15 @@ ScheduleAI leverages Google's Agent Development Kit (ADK) to create an intellige
 │   │       ├── find_free_time.py           # Tool for finding free time slots
 │   │       ├── list_event.py               # Tool for listing events
 │   │       └── utils.py                    # Utility functions
-│   ├── main.py                             # FastAPI application entry point
 │   └── static/                             # Frontend
 │       ├── index.html                      # Web interface
 │       └── js/                             # JavaScript modules
 │           ├── app.js                      # Main application logic
 │           ├── audio-player.js             # Audio playback handling
 │           ├── audio-recorder.js           # Audio recording handling
-            ├── pcm-player-processor.js     # AudioWorklet processors
+│           ├── pcm-player-processor.js     # AudioWorklet processors
 │           └── pcm-recorder-processor.js   # AudioWorklet processors
+├── main.py                                 # FastAPI application setup
 ├── auth.py                                 # Google OAuth authentication
 ├── pyproject.toml                          # Project dependencies
 └── requirements.txt                        # Project dependencies
