@@ -3,7 +3,7 @@ ScheduleAI is an intelligent AI voice assistant designed to automate your schedu
 
 ![ScheduleAI Interface](./assests/Screenshot%202025-07-01%20173316.png)
 
-### Objective 🚀
+## Objective 🚀
 The primary goal of ScheduleAI is to simplify calendar management. By integrating with Google Calendar, ScheduleAI aims to provide users with a seamless and intuitive way to:
 
 - **Create new events -** Quickly add any appointments, meetings or any event to your calendar
@@ -16,20 +16,18 @@ The primary goal of ScheduleAI is to simplify calendar management. By integratin
 
 - **Find free time  -** Identify available slots in your schedule based on your existing commitments
 
-### How It Works ⚙️ 
-
-ScheduleAI leverages Google's Agent Development Kit (ADK) to create an intelligent AI Event Manager agent that can:
+## How It Works ⚙️ 
+ScheduleAI leverages Google's Agent Development Kit (ADK) to create an intelligent Event Manager AI agent that can:
 
 - **Understand natural language requests -** The AI engine interprets your scheduling intent and extracts key information from your commands
 
 - **Execute calendar operations -** The agent translates user requests into specific Google Calendar API calls allowing it to create, edit, delete, or retrieve event information
 
-- **Real-time Communication -** For voice interactions, ScheduleAI utilizes WebSockets to maintain a real-time, bidirectional audio stream, ensuring a smooth and responsive conversational experience
+- **Real-time Communication -** For voice interactions, ScheduleAI utilizes WebSockets to maintain a real-time audio stream, ensuring a smooth and responsive conversational experience
 
 - **Manage scheduling conflicts -** The system can identify conflicts and suggest alternatives
 
-### Architecture 🔎
-
+## Architecture 🔎
 - **FastAPI Backend -** Handles WebSocket connections and integrates with Google ADK using asynchronous request handling. Implements communication channels with `agent_to_client_messaging` and `client_to_agent_messaging` functions to process events and requests.
 
 - **AI -** Uses Google ADK with `gemini-live-2.5-flash-preview` live model to create the `event_manager` AI agent
@@ -38,8 +36,7 @@ ScheduleAI leverages Google's Agent Development Kit (ADK) to create an intellige
 
 - **Audio Processing -** Implements Web Audio API's AudioWorklet for high-performance, low-latency audio processing. It captures audio using `PCMProcessor` in the audio-recorder worklet
 
-### Project Structure 📂
-
+## Project Structure 📂
 ```
 ├── app/                                    # Main application directory
 │   ├── event_manager/                      # AI agent implementation
