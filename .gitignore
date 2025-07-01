@@ -1,0 +1,12 @@
+.venv
+credentials.json
+uv.lock
+.python-version
+
+app/__pycache__
+app/event_manager/__pycache__
+app/event_manager/tools/__pycache__
+
+# env files 
+app/.env*
+app/event_manager/.env*
