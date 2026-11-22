@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: scheduleai
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # Pin Python explicitly. Render otherwise defaults to 3.14, which has no
+      # prebuilt wheel for pydantic_core==2.33.2 and fails to compile.
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: GOOGLE_GENAI_USE_VERTEXAI
+        value: FALSE
+      # Secrets: entered in the Render dashboard, never committed.
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GOOGLE_CALENDAR_TOKEN_JSON
+        sync: false
