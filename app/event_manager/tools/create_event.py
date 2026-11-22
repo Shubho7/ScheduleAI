@@ -33,6 +33,14 @@ def create_event(
     Returns:
         dict: Information about the created event or error details
     """
+    # Guard: an email address in the title means the invitee was not added as an
+    # attendee, so no invite would be sent. Refuse and let the agent retry correctly.
+    if summary and re.search(r"\S+@\S+", summary):
+        return {
+            "status": "error",
+            "message": "Do not put email addresses in the title. Use the `attendees` parameter for invitees and a short title for `summary`.",
+        }
+
     try:
         # Get calendar service
         service = get_calendar_service(tool_context)
