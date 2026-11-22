@@ -1,4 +1,6 @@
 import datetime
+import re
+import uuid
 from google.adk.tools import ToolContext
 from .utils import (
     NOT_CONNECTED_CODE,
@@ -7,19 +9,26 @@ from .utils import (
     parse_datetime,
 )
 
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
 def create_event(
     summary: str,
     start_time: str,
     end_time: str,
     tool_context: ToolContext,
+    attendees: str = "",
+    add_meet_link: bool = False,
 ) -> dict:
     """
-    Create a new event in Google Calendar.
+    Create a new event in Google Calendar, optionally inviting people and adding a Google Meet link.
 
     Args:
         summary (str): Event title/summary
         start_time (str): Start time (e.g., "2023-12-31 14:00")
         end_time (str): End time (e.g., "2023-12-31 15:00")
+        attendees (str): Comma-separated email addresses of people to invite (e.g., "alex@gmail.com, sam@example.com"). Leave empty for a personal event. Google emails each invitee.
+        add_meet_link (bool): Set to True to add a Google Meet video link. Use True when scheduling a meeting with someone.
 
     Returns:
         dict: Information about the created event or error details
@@ -73,17 +82,48 @@ def create_event(
         }
         event_body["end"] = {"dateTime": end_dt.isoformat(), "timeZone": timezone_id}
 
-        # Call the Calendar API to create the event
-        event = (
-            service.events().insert(calendarId=calendar_id, body=event_body).execute()
-        )
+        # Invitees: validate every address before creating anything
+        emails = [e.strip() for e in (attendees or "").split(",") if e.strip()]
+        invalid = [e for e in emails if not EMAIL_RE.match(e)]
+        if invalid:
+            return {
+                "status": "error",
+                "message": f"These are not valid email addresses: {', '.join(invalid)}. Ask the user for the correct address.",
+            }
+        if emails:
+            event_body["attendees"] = [{"email": e} for e in emails]
 
-        return {
+        insert_kwargs = {"calendarId": calendar_id, "body": event_body}
+
+        # Google Meet link: Google requires a request id so retries don't create duplicate links
+        if add_meet_link:
+            event_body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": uuid.uuid4().hex,
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            }
+            insert_kwargs["conferenceDataVersion"] = 1
+
+        # Email invitations to attendees (Google sends the normal invite)
+        if emails:
+            insert_kwargs["sendUpdates"] = "all"
+
+        # Call the Calendar API to create the event
+        event = service.events().insert(**insert_kwargs).execute()
+
+        meet_link = event.get("hangoutLink", "")
+        result = {
             "status": "success",
             "message": "Event created successfully",
             "event_id": event["id"],
             "event_link": event.get("htmlLink", ""),
         }
+        if emails:
+            result["invited"] = emails
+        if meet_link:
+            result["meet_link"] = meet_link
+        return result
 
     except Exception as e:
         return {"status": "error", "message": f"Error creating event: {str(e)}"}

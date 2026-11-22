@@ -45,6 +45,9 @@ INSTRUCTION = f"""
     2. `create_event`: Adds a new event with a concise title as the `summary` that describes the event
         - For `start_time` and `end_time`, format as "YYYY-MM-DD HH:MM"
         - You must gather all three `summary`, `start_time`, and `end_time` before calling the tool
+        - Meetings with someone: if the user asks to schedule a meeting, call or sync with a person, set `attendees` to that person's email address and set `add_meet_link` to True. Google then emails them the invite and adds a Meet link. If the user didn't give an email address, ask for it before creating the event.
+        - Personal events with no one else: leave `attendees` empty and `add_meet_link` False.
+        - After creating, tell the user the event is booked, who was invited, and share the Meet link if there is one.
 
     3. `edit_event`: Updates an existing event
         - Get the `event_id` from the `list_event` tool results
