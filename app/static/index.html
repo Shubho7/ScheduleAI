@@ -74,7 +74,51 @@
         margin-bottom: 12px;
         letter-spacing: -0.5px;
       }
-      
+
+      #calendar-auth {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        gap: 10px;
+        min-height: 34px;
+        font-size: 14px;
+        color: var(--text-secondary);
+      }
+
+      #calendar-auth .auth-btn {
+        display: inline-block;
+        width: auto;
+        min-width: 0;
+        padding: 7px 16px;
+        border-radius: 999px;
+        border: 1px solid var(--border-color);
+        background: var(--surface-color);
+        color: var(--text-color);
+        font-size: 14px;
+        text-decoration: none;
+        cursor: pointer;
+        transition: border-color 0.2s, background 0.2s;
+      }
+
+      #calendar-auth .auth-btn:hover {
+        border-color: var(--primary-color);
+        background: var(--surface-hover);
+      }
+
+      #calendar-auth .auth-btn.primary {
+        background: var(--gradient-primary);
+        border-color: transparent;
+      }
+
+      #calendar-auth .auth-email {
+        color: var(--text-color);
+      }
+
+      #calendar-auth .auth-warning {
+        color: var(--primary-hover);
+      }
+
       .subtitle {
         font-size: 16px;
         color: var(--text-secondary);
@@ -500,6 +544,7 @@
     <div class="chat-container">
       <header>
         <h1>ScheduleAI</h1>
+        <div id="calendar-auth" aria-live="polite"></div>
       </header>
       
       <div id="messages">

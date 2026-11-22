@@ -1,9 +1,16 @@
 import datetime
-from .utils import format_event_time, get_calendar_service
+from google.adk.tools import ToolContext
+from .utils import (
+    NOT_CONNECTED_CODE,
+    NOT_CONNECTED_MESSAGE,
+    format_event_time,
+    get_calendar_service,
+)
 
 def list_event(
     start_date: str,
     days: int,
+    tool_context: ToolContext,
 ) -> dict:
     """
     List upcoming calendar events within a specified date range.
@@ -21,11 +28,12 @@ def list_event(
         print("Days: ", days)
 
         # Get calendar service
-        service = get_calendar_service()
+        service = get_calendar_service(tool_context)
         if not service:
             return {
                 "status": "error",
-                "message": "Failed to authenticate with Google Calendar",
+                "error_code": NOT_CONNECTED_CODE,
+                "message": NOT_CONNECTED_MESSAGE,
                 "events": [],
             }
 

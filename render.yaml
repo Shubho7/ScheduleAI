@@ -12,8 +12,17 @@ services:
         value: 3.13.4
       - key: GOOGLE_GENAI_USE_VERTEXAI
         value: FALSE
+      # Public URL of the service; the Google redirect URI is this + /auth/callback
+      - key: APP_BASE_URL
+        value: https://scheduleaiv1.onrender.com
+      # Encrypts the per-user Google login cookie. Generated once by Render.
+      - key: COOKIE_SECRET
+        generateValue: true
       # Secrets: entered in the Render dashboard, never committed.
       - key: GOOGLE_API_KEY
         sync: false
-      - key: GOOGLE_CALENDAR_TOKEN_JSON
+      # OAuth client of type "Web application" from Google Cloud Console
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
         sync: false

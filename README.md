@@ -30,7 +30,9 @@ ScheduleAI leverages Google's Agent Development Kit (ADK) to create an intellige
 ## Architecture 🔎
 - **FastAPI Backend -** Handles WebSocket connections and integrates with Google ADK using asynchronous request handling. Implements communication channels with `agent_to_client_messaging` and `client_to_agent_messaging` functions to process events and requests.
 
-- **AI -** Uses Google ADK with `gemini-live-2.5-flash-preview` live model to create the `event_manager` AI agent
+- **AI -** Uses Google ADK to create the `event_manager` AI agent. Text chat runs on a regular Gemini model and voice runs on a Gemini Live model (model names are set in `app/event_manager/agent.py`)
+
+- **Per-user Google Calendar -** Each visitor clicks **Connect Google Calendar** and signs in with their own Google account. Their login is stored only in an encrypted, HttpOnly cookie in their own browser (no database), and the agent's tools use that user's calendar only.
 
 - **WebSocket Communication -** Enables real-time communication for both text and voice interactions. The system maintains persistent connections through the `/ws/{session_id}` endpoint with separate async tasks for sending and receiving messages.
 
@@ -39,6 +41,7 @@ ScheduleAI leverages Google's Agent Development Kit (ADK) to create an intellige
 ## Project Structure 📂
 ```
 ├── app/                                    # Main application directory
+│   ├── google_auth.py                      # Per-user Google sign-in (OAuth) routes
 │   ├── event_manager/                      # AI agent implementation
 │   │   ├── agent.py                        # Agent definition and configuration
 │   │   └── tools/                          # Calendar operation tools
@@ -57,7 +60,24 @@ ScheduleAI leverages Google's Agent Development Kit (ADK) to create an intellige
 │           ├── pcm-player-processor.js     # AudioWorklet processors
 │           └── pcm-recorder-processor.js   # AudioWorklet processors
 ├── main.py                                 # FastAPI application setup
-├── auth.py                                 # Google OAuth authentication
+├── render.yaml                             # Render deployment blueprint
 ├── pyproject.toml                          # Project dependencies
 └── requirements.txt                        # Project dependencies
 ```
+
+## Configuration 🔧
+Set these environment variables (a local `.env` file works for development):
+
+| Variable | Purpose |
+|---|---|
+| `GOOGLE_API_KEY` | Gemini API key |
+| `GOOGLE_GENAI_USE_VERTEXAI` | `FALSE` |
+| `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` | Google OAuth client of type **Web application** |
+| `APP_BASE_URL` | Public URL of the app, e.g. `https://your-app.onrender.com` (`http://localhost:8000` locally) |
+| `COOKIE_SECRET` | Any long random string; encrypts the login cookie |
+
+**Google Cloud setup:** enable the Google Calendar API, create an OAuth client (type *Web application*), and add `APP_BASE_URL + /auth/callback` (e.g. `https://your-app.onrender.com/auth/callback` and `http://localhost:8000/auth/callback`) as an authorized redirect URI. While the OAuth consent screen is in *Testing* mode, add each person as a test user (up to 100); they will see an "unverified app" warning and need to reconnect about every 7 days. Publishing the app (with Google verification) removes those limits.
+
+**Run locally:** `uvicorn main:app --port 8000`, then open `http://localhost:8000`.
+
+**Deploy on Render:** use `render.yaml` (Python 3.13 is pinned there) and fill in the secret variables in the dashboard.

@@ -1,5 +1,6 @@
 import datetime
-from .utils import get_calendar_service
+from google.adk.tools import ToolContext
+from .utils import NOT_CONNECTED_CODE, NOT_CONNECTED_MESSAGE, get_calendar_service
 
 def format_time_for_display(dt):
     """
@@ -41,6 +42,7 @@ def find_free_time(
     start_hour: int = 9,
     end_hour: int = 2,
     min_duration: int = 30,
+    tool_context: ToolContext = None,
 ) -> dict:
     """
     Find available free time slots in Google Calendar within a specified date range.
@@ -63,11 +65,12 @@ def find_free_time(
         print("Minimum duration: ", f"{min_duration} minutes")
 
         # Get calendar service
-        service = get_calendar_service()
+        service = get_calendar_service(tool_context)
         if not service:
             return {
                 "status": "error",
-                "message": "Failed to authenticate with Google Calendar",
+                "error_code": NOT_CONNECTED_CODE,
+                "message": NOT_CONNECTED_MESSAGE,
                 "free_slots": [],
             }
 

@@ -1,10 +1,17 @@
-from .utils import get_calendar_service, parse_datetime
+from google.adk.tools import ToolContext
+from .utils import (
+    NOT_CONNECTED_CODE,
+    NOT_CONNECTED_MESSAGE,
+    get_calendar_service,
+    parse_datetime,
+)
 
 def edit_event(
     event_id: str,
     summary: str,
     start_time: str,
     end_time: str,
+    tool_context: ToolContext,
 ) -> dict:
     """
     Edit an existing event in Google Calendar - change title and/or reschedule.
@@ -20,11 +27,12 @@ def edit_event(
     """
     try:
         # Get calendar service
-        service = get_calendar_service()
+        service = get_calendar_service(tool_context)
         if not service:
             return {
                 "status": "error",
-                "message": "Failed to authenticate with Google Calendar",
+                "error_code": NOT_CONNECTED_CODE,
+                "message": NOT_CONNECTED_MESSAGE,
             }
 
         # Always use primary calendar

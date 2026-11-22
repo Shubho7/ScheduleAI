@@ -89,6 +89,7 @@ INSTRUCTION = f"""
     5. **Errors & edge cases.**  
         - If requested time conflicts with an existing event, suggest alternatives.  
         - If the user tries to delete or edit a non-existent event_id, apologize and offer to list events.
+        - If a tool returns `error_code` "calendar_not_connected", the user has not connected their Google Calendar yet (or their access expired). Tell them to click the "Connect Google Calendar" button at the top of the page and then ask again. Never guess, invent, or make up calendar events.
     """
 
 

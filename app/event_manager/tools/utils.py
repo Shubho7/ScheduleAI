@@ -1,70 +1,54 @@
-import json
-import os
 from datetime import datetime
-from pathlib import Path
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from app.google_auth import REFRESH_TOKEN_KEY, SCOPES, TOKEN_URI, client_credentials
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
-
-# Path for token storage (local development)
-TOKEN_PATH = Path(os.path.expanduser("~/.credentials/calendar_token.json"))
-CREDENTIALS_PATH = Path("credentials.json")
-
-# On hosted deployments, the token JSON is supplied as an environment variable
-# instead of a file. It contains the client_id/client_secret and refresh_token,
-# so it can refresh itself without credentials.json.
-TOKEN_ENV_VAR = "GOOGLE_CALENDAR_TOKEN_JSON"
+# Returned by every tool when the visitor hasn't connected (or must reconnect).
+NOT_CONNECTED_MESSAGE = (
+    "Google Calendar is not connected. Ask the user to click the "
+    "'Connect Google Calendar' button at the top of the page, then try again."
+)
+NOT_CONNECTED_CODE = "calendar_not_connected"
 
 
-def _load_token_info():
-    """Return the saved token dict from the env var or local file, or None."""
-    env_token = os.getenv(TOKEN_ENV_VAR)
-    if env_token:
-        return json.loads(env_token)
-    if TOKEN_PATH.exists():
-        return json.loads(TOKEN_PATH.read_text())
-    return None
-
-
-def get_calendar_service():
+def get_calendar_service(tool_context):
     """
-    Authenticate and create a Google Calendar service object.
+    Create a Google Calendar service for the user of this chat session.
+
+    The user's refresh token is placed in the session state when their
+    WebSocket connects (from their own encrypted cookie).
+
+    Args:
+        tool_context: The ADK ToolContext passed to the calling tool.
 
     Returns:
-        A Google Calendar service object or None if authentication fails
+        A Google Calendar service object, or None if the user has not connected
+        their calendar or their access was revoked/expired.
     """
-    creds = None
+    refresh_token = tool_context.state.get(REFRESH_TOKEN_KEY)
+    client_id, client_secret = client_credentials()
+    if not (refresh_token and client_id and client_secret):
+        return None
 
-    # Check if a saved token exists (env var first, then local file)
-    token_info = _load_token_info()
-    if token_info:
-        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri=TOKEN_URI,
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=SCOPES,
+    )
+    try:
+        creds.refresh(Request())
+    except RefreshError as e:
+        # Revoked, or expired (tokens last ~7 days while the OAuth app is in Testing)
+        print(f"[AUTH] refresh failed: {e}")
+        return None
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not CREDENTIALS_PATH.exists():
-                print(
-                    f"Error: {CREDENTIALS_PATH} not found. Set {TOKEN_ENV_VAR} on hosted "
-                    "deployments, or follow setup instructions locally."
-                )
-                return None
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        # Save refreshed/new credentials locally. The env-var token is not
-        # written back, since the host's filesystem is ephemeral.
-        if not os.getenv(TOKEN_ENV_VAR):
-            TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-            TOKEN_PATH.write_text(creds.to_json())
-
-    # Create and return the Calendar service
-    return build("calendar", "v3", credentials=creds)
 
 def format_event_time(event_time):
     """

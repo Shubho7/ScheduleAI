@@ -151,6 +151,70 @@ function connectWebsocket() {
 }
 connectWebsocket();
 
+// --- Google Calendar connection (each visitor connects their own account) ---
+const calendarAuthDiv = document.getElementById("calendar-auth");
+
+function authElement(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text) el.textContent = text;
+  return el;
+}
+
+function renderCalendarAuth(status, notice) {
+  calendarAuthDiv.replaceChildren();
+
+  if (notice) {
+    calendarAuthDiv.appendChild(authElement("span", "auth-warning", notice));
+  }
+
+  if (!status.configured) {
+    calendarAuthDiv.appendChild(
+      authElement("span", "", "Calendar sign-in isn't set up on this server.")
+    );
+  } else if (status.connected) {
+    calendarAuthDiv.appendChild(authElement("span", "", "Calendar connected"));
+    if (status.email) {
+      calendarAuthDiv.appendChild(authElement("span", "auth-email", status.email));
+    }
+    const disconnect = authElement("button", "auth-btn", "Disconnect");
+    disconnect.type = "button";
+    disconnect.addEventListener("click", async () => {
+      disconnect.disabled = true;
+      try {
+        await fetch("/auth/disconnect", { method: "POST" });
+      } finally {
+        // Reload so the new chat session starts without the calendar login
+        window.location.reload();
+      }
+    });
+    calendarAuthDiv.appendChild(disconnect);
+  } else {
+    const connect = authElement("a", "auth-btn primary", "Connect Google Calendar");
+    connect.href = "/auth/login";
+    calendarAuthDiv.appendChild(connect);
+  }
+}
+
+async function initCalendarAuth() {
+  // The server sends users back to "/?auth=..." after the Google sign-in
+  const params = new URLSearchParams(window.location.search);
+  const result = params.get("auth");
+  let notice = "";
+  if (result === "denied") notice = "Access was not granted.";
+  else if (result === "error") notice = "Sign-in failed. Please try again.";
+  if (result) window.history.replaceState({}, "", window.location.pathname);
+
+  try {
+    const response = await fetch("/auth/status", { cache: "no-store" });
+    renderCalendarAuth(await response.json(), notice);
+  } catch (e) {
+    console.error("Could not load calendar status", e);
+  }
+}
+
+initCalendarAuth();
+
 // Add submit handler to the form
 function addSubmitHandler() {
   messageForm.onsubmit = function (e) {

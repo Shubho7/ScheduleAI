@@ -3,8 +3,10 @@ import base64
 import json
 import os
 import traceback
+import uuid
 from pathlib import Path
 from typing import AsyncIterable
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -17,6 +19,8 @@ from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
 from app.event_manager.agent import live_agent, text_agent
+from app.google_auth import REFRESH_TOKEN_KEY, get_refresh_token
+from app.google_auth import router as auth_router
 
 load_dotenv()
 
@@ -45,14 +49,15 @@ text_runner = Runner(
     session_service=session_service,
 )
 
-def start_agent_session(session_id, is_audio=False):
+def start_agent_session(session_id, is_audio=False, state=None):
     """Starts an agent session"""
 
-    # Create a Session
+    # Create a Session (state carries this user's Google Calendar login)
     session = session_service.create_session(
         app_name=APP_NAME,
         user_id=session_id,
         session_id=session_id,
+        state=state,
     )
 
     # Create a Runner
@@ -174,12 +179,10 @@ async def client_to_agent_messaging(
             raise ValueError(f"Mime type not supported: {mime_type}")
 
 
-async def text_chat_messaging(websocket: WebSocket, session_id: str):
+async def text_chat_messaging(websocket: WebSocket, session_id: str, state: dict):
     """Text mode: one request/response turn per user message."""
-    session = session_service.get_session(
-        app_name=APP_NAME, user_id=session_id, session_id=session_id
-    ) or session_service.create_session(
-        app_name=APP_NAME, user_id=session_id, session_id=session_id
+    session = session_service.create_session(
+        app_name=APP_NAME, user_id=session_id, session_id=session_id, state=state
     )
 
     while True:
@@ -228,6 +231,7 @@ async def text_chat_messaging(websocket: WebSocket, session_id: str):
 
 
 app = FastAPI()
+app.include_router(auth_router)
 
 STATIC_DIR = Path("app/static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -245,13 +249,32 @@ async def websocket_endpoint(
 ):
     """Client websocket endpoint"""
 
+    # Only accept connections from our own pages (the cookie carries the user's
+    # calendar login, so don't let other websites open a socket on their behalf).
+    origin = websocket.headers.get("origin")
+    if origin and urlparse(origin).netloc != websocket.headers.get("host"):
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
-    print(f"Client #{session_id} connected, audio mode: {is_audio}")
+
+    # Use a server-generated id for the chat session instead of the client's
+    # (guessable) one, so users can never end up in each other's sessions.
+    conn_id = uuid.uuid4().hex
+    # This visitor's own Google Calendar login, from their encrypted cookie
+    refresh_token = get_refresh_token(websocket.cookies)
+    state = {REFRESH_TOKEN_KEY: refresh_token} if refresh_token else {}
+    print(
+        f"Client #{session_id} connected as {conn_id[:8]}, audio mode: {is_audio}, "
+        f"calendar connected: {bool(refresh_token)}"
+    )
 
     try:
         if is_audio == "true":
             # Voice mode: streaming Live API session
-            live_events, live_request_queue = start_agent_session(session_id, True)
+            live_events, live_request_queue = start_agent_session(
+                conn_id, True, state=state
+            )
 
             agent_to_client_task = asyncio.create_task(
                 agent_to_client_messaging(websocket, live_events)
@@ -261,7 +284,7 @@ async def websocket_endpoint(
             )
             await asyncio.gather(agent_to_client_task, client_to_agent_task)
         else:
-            await text_chat_messaging(websocket, session_id)
+            await text_chat_messaging(websocket, conn_id, state)
     except WebSocketDisconnect:
         pass
 

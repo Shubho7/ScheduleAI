@@ -1,8 +1,10 @@
-from .utils import get_calendar_service
+from google.adk.tools import ToolContext
+from .utils import NOT_CONNECTED_CODE, NOT_CONNECTED_MESSAGE, get_calendar_service
 
 def delete_event(
     event_id: str,
     confirm: bool,
+    tool_context: ToolContext,
 ) -> dict:
     """
     Delete an event from Google Calendar.
@@ -22,11 +24,12 @@ def delete_event(
 
     try:
         # Get calendar service
-        service = get_calendar_service()
+        service = get_calendar_service(tool_context)
         if not service:
             return {
                 "status": "error",
-                "message": "Failed to authenticate with Google Calendar",
+                "error_code": NOT_CONNECTED_CODE,
+                "message": NOT_CONNECTED_MESSAGE,
             }
 
         # Always use primary calendar
