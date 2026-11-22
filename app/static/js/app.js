@@ -1,5 +1,6 @@
 const sessionId = Math.random().toString().substring(10);
-const ws_url = "ws://" + window.location.host + "/ws/" + sessionId;
+const ws_scheme = window.location.protocol === "https:" ? "wss://" : "ws://";
+const ws_url = ws_scheme + window.location.host + "/ws/" + sessionId;
 let websocket = null;
 let is_audio = false;
 let currentMessageId = null; 

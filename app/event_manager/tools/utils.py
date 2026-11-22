@@ -9,9 +9,24 @@ from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-# Path for token storage
+# Path for token storage (local development)
 TOKEN_PATH = Path(os.path.expanduser("~/.credentials/calendar_token.json"))
 CREDENTIALS_PATH = Path("credentials.json")
+
+# On hosted deployments, the token JSON is supplied as an environment variable
+# instead of a file. It contains the client_id/client_secret and refresh_token,
+# so it can refresh itself without credentials.json.
+TOKEN_ENV_VAR = "GOOGLE_CALENDAR_TOKEN_JSON"
+
+
+def _load_token_info():
+    """Return the saved token dict from the env var or local file, or None."""
+    env_token = os.getenv(TOKEN_ENV_VAR)
+    if env_token:
+        return json.loads(env_token)
+    if TOKEN_PATH.exists():
+        return json.loads(TOKEN_PATH.read_text())
+    return None
 
 
 def get_calendar_service():
@@ -23,11 +38,10 @@ def get_calendar_service():
     """
     creds = None
 
-    # Check if token exists and is valid
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_info(
-            json.loads(TOKEN_PATH.read_text()), SCOPES
-        )
+    # Check if a saved token exists (env var first, then local file)
+    token_info = _load_token_info()
+    if token_info:
+        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -35,16 +49,19 @@ def get_calendar_service():
         else:
             if not CREDENTIALS_PATH.exists():
                 print(
-                    f"Error: {CREDENTIALS_PATH} not found. Please follow setup instructions."
+                    f"Error: {CREDENTIALS_PATH} not found. Set {TOKEN_ENV_VAR} on hosted "
+                    "deployments, or follow setup instructions locally."
                 )
                 return None
 
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
             creds = flow.run_local_server(port=0)
 
-        # Save the credentials for the next run
-        TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_PATH.write_text(creds.to_json())
+        # Save refreshed/new credentials locally. The env-var token is not
+        # written back, since the host's filesystem is ephemeral.
+        if not os.getenv(TOKEN_ENV_VAR):
+            TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+            TOKEN_PATH.write_text(creds.to_json())
 
     # Create and return the Calendar service
     return build("calendar", "v3", credentials=creds)
