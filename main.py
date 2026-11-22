@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterable, Optional
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -14,10 +15,11 @@ from fastapi.staticfiles import StaticFiles
 from google.adk.agents import LiveRequestQueue
 from google.adk.agents.run_config import RunConfig
 from google.adk.events.event import Event
-from google.adk.flows.llm_flows import base_llm_flow
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
+from app import adk_patches, chat_notices
+from app.guest_aliases import hide_emails
 from app.event_manager.agent import live_agent, text_agent
 from app.google_auth import (
     REFRESH_TOKEN_KEY,
@@ -29,23 +31,22 @@ from app.google_auth import router as auth_router
 
 load_dotenv()
 
-# Compatibility patch: Gemini 3.x returns a binary `thought_signature` on tool
-# calls, and ADK 0.5.0's tracing json.dumps() the request, which fails on bytes
-# and aborts the reply. Tracing is optional, so log failures instead of raising.
-_original_trace_call_llm = base_llm_flow.trace_call_llm
-
-
-def _safe_trace_call_llm(*args, **kwargs):
-    try:
-        _original_trace_call_llm(*args, **kwargs)
-    except Exception as e:
-        print(f"[TRACE SKIPPED]: {type(e).__name__}: {e}")
-
-
-base_llm_flow.trace_call_llm = _safe_trace_call_llm
+# Fixes for google-adk 0.5.0 (see app/adk_patches.py)
+adk_patches.apply()
 
 APP_NAME = "ScheduleAI"
 session_service = InMemorySessionService()
+
+
+def valid_timezone(name: Optional[str]) -> Optional[str]:
+    """The IANA timezone name if it is valid (e.g. "Asia/Kolkata"), else None."""
+    if not name:
+        return None
+    try:
+        ZoneInfo(name)
+        return name
+    except Exception:
+        return None
 
 # Text chat uses a regular Gemini model (Live models only return audio).
 text_runner = Runner(
@@ -88,7 +89,11 @@ def start_agent_session(session_id, is_audio=False, state=None):
     config = {
         "response_modalities": [modality],
         "speech_config": speech_config,
+        # Transcribe both sides. The user's spoken words are saved into the
+        # session history too, so the conversation can be restored after a
+        # reconnect (without this the agent only remembered its own side).
         "output_audio_transcription": {},
+        "input_audio_transcription": {},
     }
 
     run_config = RunConfig(**config)
@@ -160,7 +165,7 @@ async def agent_to_client_messaging(
 
 
 async def client_to_agent_messaging(
-    websocket: WebSocket, live_request_queue: LiveRequestQueue
+    websocket: WebSocket, live_request_queue: LiveRequestQueue, chat_id: str
 ):
     """Client to agent communication"""
     while True:
@@ -179,9 +184,22 @@ async def client_to_agent_messaging(
 
         # Send the message to the agent
         if mime_type == "text/plain":
-            # Send a text message
+            # The voice model must never see (and so never read out) an email
+            # address: replace typed addresses with placeholders. The tools swap
+            # the real address back in when they call Google.
+            data = hide_emails(chat_id, data)
             content = types.Content(role=role, parts=[types.Part.from_text(text=data)])
             live_request_queue.send_content(content=content)
+
+            # ADK does not save typed messages of a live session into its history,
+            # so after a reconnect the agent would not know them. Save it ourselves.
+            saved = session_service.get_session(
+                app_name=APP_NAME, user_id=chat_id, session_id=chat_id
+            )
+            if saved:
+                session_service.append_event(
+                    session=saved, event=Event(author="user", content=content)
+                )
             print(f"[CLIENT TO AGENT PRINT]: {data}")
         elif mime_type == "audio/pcm":
             # Send audio data
@@ -271,6 +289,7 @@ async def websocket_endpoint(
     session_id: str,
     is_audio: str = Query(...),
     resume: Optional[str] = Query(None),
+    tz: Optional[str] = Query(None),
 ):
     """Client websocket endpoint"""
 
@@ -285,7 +304,6 @@ async def websocket_endpoint(
 
     # This visitor's own Google Calendar login, from their encrypted cookie
     refresh_token = get_refresh_token(websocket.cookies)
-    state = {REFRESH_TOKEN_KEY: refresh_token} if refresh_token else {}
 
     # The chat id is server-generated (never the client's guessable one). When the
     # page reconnects it sends back a resume token that only this server can issue
@@ -300,11 +318,23 @@ async def websocket_endpoint(
     use_audio = is_audio == "true"
     # Text and voice keep separate conversation histories
     chat_id = f"{conn_id}-{'v' if use_audio else 't'}"
+
+    # Session state the agent and its tools can read
+    state = {"chat_id": chat_id, "voice": use_audio}
+    if refresh_token:
+        state[REFRESH_TOKEN_KEY] = refresh_token
+    user_timezone = valid_timezone(tz)
+    if user_timezone:
+        state["tz"] = user_timezone  # the browser's timezone, for "today"/"tomorrow"
+
     print(
         f"Client #{session_id} connected as {conn_id[:8]} ({'voice' if use_audio else 'text'}, "
         f"resume token {'accepted' if resumed else 'not used'}), "
-        f"calendar connected: {bool(refresh_token)}"
+        f"calendar connected: {bool(refresh_token)}, timezone: {user_timezone or 'default'}"
     )
+
+    # Lets tools post messages (e.g. the Meet link) straight into this chat
+    chat_notices.register(chat_id, websocket)
 
     try:
         if use_audio:
@@ -317,7 +347,7 @@ async def websocket_endpoint(
                 agent_to_client_messaging(websocket, live_events)
             )
             client_to_agent_task = asyncio.create_task(
-                client_to_agent_messaging(websocket, live_request_queue)
+                client_to_agent_messaging(websocket, live_request_queue, chat_id)
             )
             # Stop as soon as either side ends, instead of waiting forever on the other
             done, pending = await asyncio.wait(
@@ -344,5 +374,7 @@ async def websocket_endpoint(
             await websocket.close(code=1011)
         except Exception:
             pass
+    finally:
+        chat_notices.unregister(chat_id, websocket)
 
     print(f"Client #{session_id} disconnected")

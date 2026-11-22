@@ -1,25 +1,31 @@
 import asyncio
 import functools
+import re
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from google.adk.agents import Agent
 from google.adk.tools.function_tool import FunctionTool
+from app.chat_notices import post as post_chat_notice
+from app.guest_aliases import reveal_emails
 from .tools import (
     create_event,
     delete_event,
     edit_event,
     list_event,
     find_free_time,
-    get_current_time
 )
 
-# Default timezone
-timezone_id = "Asia/Kolkata"
+# Used when the browser doesn't report a valid timezone
+DEFAULT_TIMEZONE = "Asia/Kolkata"
 
 # Current Gemini Live models only return audio, so text chat and voice use
 # different models. Both share the same instructions and calendar tools.
 TEXT_MODEL = "gemini-3.1-flash-lite"
 LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
 
-INSTRUCTION = f"""
+# NOTE: ADK substitutes {name} placeholders in instructions, so this text and the
+# date block appended by build_instruction() must not contain curly braces.
+INSTRUCTION = """
     You are ScheduleAI, an expert Event Manager and friendly assistant. Your primary traits are being proactive, efficient, and exceptionally well in your communication. 
     You help users view, schedule, modify, delete events and discover free time slots on their Google Calendar.
     Your main goal is to make scheduling management feel seamless and intuitive for the user by accurately interpreting user requests to manage their Google Calendar by effectively using the available tools.
@@ -35,9 +41,9 @@ INSTRUCTION = f"""
     ## General Rules:
     1. **Calendar ID:** Always use `"primary"` for the `calendar_id`.
     2. **Date Formatting:** When calling a tool, use the `YYYY-MM-DD` format for dates and `YYYY-MM-DD HH:MM:SS` for specific timestamps.
-    3. **Relative Dates:** Interpret relative dates like "today," "tomorrow," or something like "next Wednesday" based on the today's date provided (Fetch today's date using `{get_current_time()}`)
-    4. **Current date and time awareness:** To handle relative queries, use the current date internally as `{get_current_time()}` (in ISO format) whenever you need “today's date”
-    5. **Timezone:** Always use the {timezone_id} timezone for all date and time operations.
+    3. **Relative Dates:** Interpret relative dates like "today," "tomorrow," or something like "next Wednesday" using the CURRENT DATE AND TIME section at the end of these instructions. That section is always up to date; never rely on dates from earlier in the conversation.
+    4. **Current date and time awareness:** Use the date calendar in that section whenever you need today's date or to resolve a day name to a date.
+    5. **Timezone:** Always use the timezone given in the CURRENT DATE AND TIME section for all date and time operations.
 
     ## AVAILABLE TOOLS -
     1. `list_event`: Shows events from the calendar. This is also the primary tool for helping users identify a specific event before an edit or deletion.
@@ -58,13 +64,16 @@ INSTRUCTION = f"""
 
     3. `edit_event`: Updates an existing event
         - Get the `event_id` from the `list_event` tool results
-        - Use empty string "" for `summary`, `start_time`, or `end_time` to keep those values unchanged
+        - Use empty string "" for `summary`, `start_time`, `end_time` or `attendees` to keep those values unchanged
         - To change the event time, specify both `start_time` and `end_time` (or both as empty strings to keep unchanged)
-        - If the user makes an ambiguous request (e.g., "change my Tuesday meeting"), first use `list_events` for that day to present the options.
+        - To change who is invited (for example the email address was wrong), pass the COMPLETE new list of email addresses in `attendees`, comma-separated. Ask the user to type the correct address in the chat box first. Never put an email address in `summary`.
+        - Google automatically emails an updated invitation to every guest whenever the time, title or guest list changes. You do not send anything yourself. After a successful change, tell the user the guests have been sent the update, but only if the tool result includes `guests_notified` or `guest_count`. If it has neither, the event has no guests, so say nothing about notifications.
+        - If the user makes an ambiguous request (e.g., "change my Tuesday meeting"), first use `list_event` for that day to present the options.
         - Before calling the tool, confirm the intended change with the user.
 
     4. `delete_event`: Removes the specified event from `"primary"` calendar
         - Similarly to `edit_event`, this requires an `event_id`. Use the `list_event` tool if necessary to identify the correct event
+        - Google automatically emails a cancellation to the guests of the event.
 
     5. `find_free_time`: Scans for gaps between scheduled events to find available time slots
         - Use the same date format as `list_events` tool (YYYY-MM-DD for `start_date`, or empty string for today)
@@ -73,6 +82,13 @@ INSTRUCTION = f"""
         - The tool searches from 9 AM today to 2 AM next day (17-hour window) by default
         - It finds ALL free time gaps within this window, including those not adjacent to events
         - Results include date, start/end times, duration, and formatted duration
+
+    ## VOICE CONVERSATIONS (when you are speaking aloud) -
+    1. NEVER say, read out or spell an email address, a web link/URL or an event ID aloud. Refer to them in general terms instead, such as "the email address you typed" or "the Meet link, which is in the chat".
+    2. When a Google Meet link has been created, do not read it. Just say that the Meet link has been shared in the chat.
+    3. Keep spoken replies short and natural, and say dates and times in plain words.
+    4. The user may also type in the chat box while talking. Treat typed text as their exact words.
+    5. Email addresses the user types reach you as placeholders such as GUEST_1. Use the placeholder exactly as it appears as the value of `attendees`. Never say a placeholder aloud; call the person "your guest" or use the name the user gave you.
 
     ##  RESPONSE AND FORMATTING GUIDELINES -
     1. **Be proactive, concise & conversational.**  
@@ -101,6 +117,67 @@ INSTRUCTION = f"""
         - If the user tries to delete or edit a non-existent event_id, apologize and offer to list events.
         - If a tool returns `error_code` "calendar_not_connected", the user has not connected their Google Calendar yet (or their access expired). Tell them to click the "Connect Google Calendar" button at the top of the page and then ask again. Never guess, invent, or make up calendar events.
     """
+
+
+def build_instruction(context) -> str:
+    """The instructions plus the CURRENT date, computed fresh for each session.
+
+    (A fixed f-string would freeze "today" at the moment the server started.)
+    The user's timezone comes from their browser via the session state.
+    """
+    tz_name = context.state.get("tz") or DEFAULT_TIMEZONE
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz_name, tz = DEFAULT_TIMEZONE, ZoneInfo(DEFAULT_TIMEZONE)
+    now = datetime.now(tz)
+
+    labels = {0: " (today)", 1: " (tomorrow)"}
+    calendar = "\n".join(
+        f"        - {d:%A}, {d.day} {d:%B %Y} = {d:%Y-%m-%d}{labels.get(i, '')}"
+        for i, d in enumerate(now + timedelta(days=i) for i in range(15))
+    )
+    return (
+        INSTRUCTION
+        + f"""
+    ## CURRENT DATE AND TIME (always trust this over anything said earlier) -
+    - Right now it is {now:%A}, {now.day} {now:%B %Y}, {now:%I:%M %p} in the {tz_name} timezone (UTC{now:%z}).
+    - Today's date is {now:%Y-%m-%d}.
+    - Calendar for the next two weeks, for resolving "tomorrow", "next Tuesday" and similar:
+{calendar}
+    - Always use the {tz_name} timezone for all dates and times.
+    """
+    )
+
+
+# Things the voice agent must never speak aloud
+_LINK_KEYS = {"meet_link", "event_link", "link", "htmlLink", "hangoutLink"}
+_GUEST_KEYS = {"attendees", "invited", "guests_notified"}
+_URL_RE = re.compile(r"https?://\S+")
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def scrub_for_voice(value):
+    """Remove links and email addresses from a tool result.
+
+    The model can only read aloud what it is given, so in voice mode the result
+    it sees has links dropped and guest lists reduced to a count.
+    """
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            if key in _LINK_KEYS:
+                continue
+            if key in _GUEST_KEYS and isinstance(item, list):
+                cleaned["guest_count"] = len(item)
+                continue
+            cleaned[key] = scrub_for_voice(item)
+        return cleaned
+    if isinstance(value, list):
+        return [scrub_for_voice(item) for item in value]
+    if isinstance(value, str):
+        return _EMAIL_RE.sub("[email]", _URL_RE.sub("[link]", value))
+    return value
 
 
 def run_in_thread(func):
@@ -133,6 +210,36 @@ class ThreadedFunctionTool(FunctionTool):
         declaration.description = self._original_doc
         return declaration
 
+    async def run_async(self, *, args, tool_context):
+        voice = tool_context.state.get("voice")
+
+        # Voice mode: the model only ever saw placeholders (GUEST_1...) for the
+        # email addresses the user typed. Swap the real addresses back in here.
+        if voice and isinstance(args.get("attendees"), str):
+            args = {
+                **args,
+                "attendees": reveal_emails(
+                    tool_context.state.get("chat_id"), args["attendees"]
+                ),
+            }
+
+        result = await super().run_async(args=args, tool_context=tool_context)
+
+        # Voice mode: the model must not be able to read links/emails aloud.
+        # Post the Meet link to the chat window instead and hide it from the model.
+        if voice and isinstance(result, dict):
+            meet_link = result.get("meet_link")
+            if meet_link:
+                await post_chat_notice(
+                    tool_context.state.get("chat_id"), f"Google Meet link: {meet_link}"
+                )
+            result = scrub_for_voice(result)
+            if meet_link:
+                result["note"] = (
+                    "The Meet link was posted in the chat window. Do not read it aloud."
+                )
+        return result
+
 
 def build_agent(model: str) -> Agent:
     """Create the event manager agent on the given Gemini model."""
@@ -140,7 +247,7 @@ def build_agent(model: str) -> Agent:
         name="event_manager",
         model=model,
         description="An AI agent to help with event scheduling and calendar operations.",
-        instruction=INSTRUCTION,
+        instruction=build_instruction,
         tools=[
             ThreadedFunctionTool(tool)
             for tool in (

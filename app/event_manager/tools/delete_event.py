@@ -35,8 +35,11 @@ def delete_event(
         # Always use primary calendar
         calendar_id = "primary"
 
-        # Call the Calendar API to delete the event
-        service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+        # Call the Calendar API to delete the event. sendUpdates="all" makes
+        # Google email a cancellation to the guests.
+        service.events().delete(
+            calendarId=calendar_id, eventId=event_id, sendUpdates="all"
+        ).execute()
 
         return {
             "status": "success",

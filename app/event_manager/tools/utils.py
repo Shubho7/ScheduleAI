@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -11,6 +12,20 @@ NOT_CONNECTED_MESSAGE = (
     "'Connect Google Calendar' button at the top of the page, then try again."
 )
 NOT_CONNECTED_CODE = "calendar_not_connected"
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def parse_email_list(text):
+    """Split a comma-separated string of email addresses.
+
+    Returns:
+        (valid_emails, invalid_entries)
+    """
+    entries = [e.strip() for e in (text or "").split(",") if e.strip()]
+    valid = [e for e in entries if EMAIL_RE.match(e)]
+    invalid = [e for e in entries if not EMAIL_RE.match(e)]
+    return valid, invalid
 
 
 def get_calendar_service(tool_context):

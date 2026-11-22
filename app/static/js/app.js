@@ -23,6 +23,25 @@ let reconnectTimer = null;
 let reconnectAttempts = 0;
 let heartbeatTimer = null;
 
+// Add text to an element, turning web addresses into clickable links
+function appendWithLinks(element, text) {
+  const urlPattern = /(https?:\/\/[^\s]+)/g;
+  text.split(urlPattern).forEach(function (piece) {
+    if (/^https?:\/\//.test(piece)) {
+      const link = document.createElement("a");
+      link.href = piece;
+      link.textContent = piece;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.style.color = "inherit";
+      link.style.textDecoration = "underline";
+      element.appendChild(link);
+    } else if (piece) {
+      element.appendChild(document.createTextNode(piece));
+    }
+  });
+}
+
 // Send a small ping regularly so proxies never see the connection as idle
 function startHeartbeat() {
   stopHeartbeat();
@@ -53,6 +72,13 @@ function connectWebsocket() {
   // Connect websocket
   let wsUrl = ws_url + "?is_audio=" + is_audio;
   if (resumeToken) wsUrl += "&resume=" + encodeURIComponent(resumeToken);
+  // The browser's timezone, so the agent knows what "today" and "3 PM" mean here
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) wsUrl += "&tz=" + encodeURIComponent(tz);
+  } catch (e) {
+    /* the server falls back to its default timezone */
+  }
   const thisSocket = new WebSocket(wsUrl);
   websocket = thisSocket;
 
@@ -123,6 +149,17 @@ function connectWebsocket() {
       removeTypingIndicator();
 
       const role = message_from_server.role || "model";
+
+      // Notices posted by the server (e.g. the Google Meet link in voice mode).
+      // Shown in the chat but not spoken, so there is no speaker icon.
+      if (role === "info") {
+        const infoElem = document.createElement("p");
+        infoElem.className = "agent-message";
+        appendWithLinks(infoElem, message_from_server.data);
+        messagesDiv.appendChild(infoElem);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        return;
+      }
 
       if (currentMessageId && role === "model") {
         const existingMessage = document.getElementById(currentMessageId);
