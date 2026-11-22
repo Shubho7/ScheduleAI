@@ -2,24 +2,48 @@ import asyncio
 import base64
 import json
 import os
+import traceback
 from pathlib import Path
 from typing import AsyncIterable
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, WebSocket
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from google.adk.agents import LiveRequestQueue
 from google.adk.agents.run_config import RunConfig
 from google.adk.events.event import Event
+from google.adk.flows.llm_flows import base_llm_flow
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
-from app.event_manager.agent import root_agent
+from app.event_manager.agent import live_agent, text_agent
 
 load_dotenv()
 
+# Compatibility patch: Gemini 3.x returns a binary `thought_signature` on tool
+# calls, and ADK 0.5.0's tracing json.dumps() the request, which fails on bytes
+# and aborts the reply. Tracing is optional, so log failures instead of raising.
+_original_trace_call_llm = base_llm_flow.trace_call_llm
+
+
+def _safe_trace_call_llm(*args, **kwargs):
+    try:
+        _original_trace_call_llm(*args, **kwargs)
+    except Exception as e:
+        print(f"[TRACE SKIPPED]: {type(e).__name__}: {e}")
+
+
+base_llm_flow.trace_call_llm = _safe_trace_call_llm
+
 APP_NAME = "ScheduleAI"
 session_service = InMemorySessionService()
+
+# Text chat uses a regular Gemini model (Live models only return audio).
+text_runner = Runner(
+    app_name=APP_NAME,
+    agent=text_agent,
+    session_service=session_service,
+)
 
 def start_agent_session(session_id, is_audio=False):
     """Starts an agent session"""
@@ -34,12 +58,12 @@ def start_agent_session(session_id, is_audio=False):
     # Create a Runner
     runner = Runner(
         app_name=APP_NAME,
-        agent=root_agent,
+        agent=live_agent,
         session_service=session_service,
     )
 
-    # Set response modality
-    modality = "AUDIO" if is_audio else "TEXT"
+    # Live models only return audio
+    modality = "AUDIO"
 
     # Speech config
     speech_config = types.SpeechConfig(
@@ -48,10 +72,11 @@ def start_agent_session(session_id, is_audio=False):
         )
     )
 
-    config = {"response_modalities": [modality], "speech_config": speech_config}
-
-    if is_audio:
-        config["output_audio_transcription"] = {}
+    config = {
+        "response_modalities": [modality],
+        "speech_config": speech_config,
+        "output_audio_transcription": {},
+    }
 
     run_config = RunConfig(**config)
 
@@ -149,6 +174,59 @@ async def client_to_agent_messaging(
             raise ValueError(f"Mime type not supported: {mime_type}")
 
 
+async def text_chat_messaging(websocket: WebSocket, session_id: str):
+    """Text mode: one request/response turn per user message."""
+    session = session_service.get_session(
+        app_name=APP_NAME, user_id=session_id, session_id=session_id
+    ) or session_service.create_session(
+        app_name=APP_NAME, user_id=session_id, session_id=session_id
+    )
+
+    while True:
+        message = json.loads(await websocket.receive_text())
+        if message.get("mime_type") != "text/plain":
+            continue
+
+        content = types.Content(
+            role="user", parts=[types.Part.from_text(text=message["data"])]
+        )
+        print(f"[CLIENT TO AGENT PRINT]: {message['data']}")
+
+        try:
+            async for event in text_runner.run_async(
+                user_id=session.user_id,
+                session_id=session.id,
+                new_message=content,
+            ):
+                if not (event.is_final_response() and event.content and event.content.parts):
+                    continue
+                text = "".join(p.text for p in event.content.parts if p.text)
+                if text:
+                    await websocket.send_text(
+                        json.dumps(
+                            {"mime_type": "text/plain", "data": text, "role": "model"}
+                        )
+                    )
+                    print(f"[AGENT TO CLIENT]: text/plain: {text}")
+        except Exception as e:
+            # Report the failure in the chat instead of dropping the connection
+            print(f"[AGENT ERROR]: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "mime_type": "text/plain",
+                        "data": "Sorry, something went wrong. Please try again.",
+                        "role": "model",
+                    }
+                )
+            )
+
+        await websocket.send_text(
+            json.dumps({"turn_complete": True, "interrupted": False})
+        )
+
+
 app = FastAPI()
 
 STATIC_DIR = Path("app/static")
@@ -170,17 +248,21 @@ async def websocket_endpoint(
     await websocket.accept()
     print(f"Client #{session_id} connected, audio mode: {is_audio}")
 
-    # Start agent session
-    live_events, live_request_queue = start_agent_session(
-        session_id, is_audio == "true"
-    )
+    try:
+        if is_audio == "true":
+            # Voice mode: streaming Live API session
+            live_events, live_request_queue = start_agent_session(session_id, True)
 
-    agent_to_client_task = asyncio.create_task(
-        agent_to_client_messaging(websocket, live_events)
-    )
-    client_to_agent_task = asyncio.create_task(
-        client_to_agent_messaging(websocket, live_request_queue)
-    )
-    await asyncio.gather(agent_to_client_task, client_to_agent_task)
+            agent_to_client_task = asyncio.create_task(
+                agent_to_client_messaging(websocket, live_events)
+            )
+            client_to_agent_task = asyncio.create_task(
+                client_to_agent_messaging(websocket, live_request_queue)
+            )
+            await asyncio.gather(agent_to_client_task, client_to_agent_task)
+        else:
+            await text_chat_messaging(websocket, session_id)
+    except WebSocketDisconnect:
+        pass
 
     print(f"Client #{session_id} disconnected")

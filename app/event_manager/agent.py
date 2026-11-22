@@ -11,11 +11,12 @@ from .tools import (
 # Default timezone
 timezone_id = "Asia/Kolkata"
 
-root_agent = Agent(
-    name="event_manager",
-    model="gemini-live-2.5-flash-preview",
-    description="An AI agent to help with event scheduling and calendar operations.",
-    instruction=f"""
+# Current Gemini Live models only return audio, so text chat and voice use
+# different models. Both share the same instructions and calendar tools.
+TEXT_MODEL = "gemini-3.1-flash-lite"
+LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
+
+INSTRUCTION = f"""
     You are ScheduleAI, an expert Event Manager and friendly assistant. Your primary traits are being proactive, efficient, and exceptionally well in your communication. 
     You help users view, schedule, modify, delete events and discover free time slots on their Google Calendar.
     Your main goal is to make scheduling management feel seamless and intuitive for the user by accurately interpreting user requests to manage their Google Calendar by effectively using the available tools.
@@ -88,13 +89,26 @@ root_agent = Agent(
     5. **Errors & edge cases.**  
         - If requested time conflicts with an existing event, suggest alternatives.  
         - If the user tries to delete or edit a non-existent event_id, apologize and offer to list events.
-    """,
+    """
 
-    tools=[
-        list_event,
-        create_event,
-        edit_event,
-        delete_event,
-        find_free_time,
-    ],
-)
+
+def build_agent(model: str) -> Agent:
+    """Create the event manager agent on the given Gemini model."""
+    return Agent(
+        name="event_manager",
+        model=model,
+        description="An AI agent to help with event scheduling and calendar operations.",
+        instruction=INSTRUCTION,
+        tools=[
+            list_event,
+            create_event,
+            edit_event,
+            delete_event,
+            find_free_time,
+        ],
+    )
+
+
+text_agent = build_agent(TEXT_MODEL)
+live_agent = build_agent(LIVE_MODEL)
+root_agent = text_agent
