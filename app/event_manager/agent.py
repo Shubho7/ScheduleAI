@@ -1,4 +1,7 @@
+import asyncio
+import functools
 from google.adk.agents import Agent
+from google.adk.tools.function_tool import FunctionTool
 from .tools import (
     create_event,
     delete_event,
@@ -100,6 +103,37 @@ INSTRUCTION = f"""
     """
 
 
+def run_in_thread(func):
+    """Run a blocking (sync) tool in a worker thread.
+
+    ADK calls sync tools directly on the server's event loop, so a slow Google
+    Calendar request would freeze every connection (missed pings, dropped
+    sockets). functools.wraps keeps the signature/docstring ADK reads to build
+    the tool schema and to inject `tool_context`.
+    """
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+    return wrapper
+
+
+class ThreadedFunctionTool(FunctionTool):
+    """A FunctionTool whose (blocking) function runs in a worker thread."""
+
+    def __init__(self, func):
+        super().__init__(run_in_thread(func))
+        self._original_doc = func.__doc__
+
+    def _get_declaration(self):
+        # ADK rebuilds the function to hide `tool_context` and loses the wrapper's
+        # docstring, so restore the tool description the model relies on.
+        declaration = super()._get_declaration()
+        declaration.description = self._original_doc
+        return declaration
+
+
 def build_agent(model: str) -> Agent:
     """Create the event manager agent on the given Gemini model."""
     return Agent(
@@ -108,11 +142,14 @@ def build_agent(model: str) -> Agent:
         description="An AI agent to help with event scheduling and calendar operations.",
         instruction=INSTRUCTION,
         tools=[
-            list_event,
-            create_event,
-            edit_event,
-            delete_event,
-            find_free_time,
+            ThreadedFunctionTool(tool)
+            for tool in (
+                list_event,
+                create_event,
+                edit_event,
+                delete_event,
+                find_free_time,
+            )
         ],
     )
 

@@ -113,6 +113,32 @@ def get_refresh_token(cookies: Mapping[str, str]) -> Optional[str]:
     return data["rt"] if data else None
 
 
+# --- chat session resume tokens ---------------------------------------------
+# When the websocket drops and reconnects, the page sends back an encrypted
+# token so it can rejoin the same chat session (and keep its context). The token
+# is bound to the user's calendar login, so it is useless to anyone else.
+
+RESUME_TTL = 60 * 60 * 6  # seconds
+
+
+def _binding(refresh_token: Optional[str]) -> str:
+    return hashlib.sha256((refresh_token or "anonymous").encode()).hexdigest()[:16]
+
+
+def make_resume_token(conn_id: str, refresh_token: Optional[str]) -> Optional[str]:
+    if not _fernet():
+        return None
+    return _encrypt({"c": conn_id, "b": _binding(refresh_token)})
+
+
+def read_resume_token(token: Optional[str], refresh_token: Optional[str]) -> Optional[str]:
+    """The chat session id inside a valid resume token for this user, else None."""
+    data = _decrypt(token, ttl=RESUME_TTL)
+    if data and data.get("b") == _binding(refresh_token):
+        return data.get("c")
+    return None
+
+
 # --- OAuth helpers ---------------------------------------------------------
 
 

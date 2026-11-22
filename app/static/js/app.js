@@ -16,16 +16,52 @@ const startAudioButton = document.getElementById("startAudioButton");
 const stopAudioButton = document.getElementById("stopAudioButton");
 const recordingContainer = document.getElementById("recording-container");
 
+// Connection state. The server hands out a resume token so that after a dropped
+// connection the page rejoins the same chat session and keeps its context.
+let resumeToken = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let heartbeatTimer = null;
+
+// Send a small ping regularly so proxies never see the connection as idle
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(function () {
+    if (websocket && websocket.readyState === WebSocket.OPEN) {
+      websocket.send(JSON.stringify({ mime_type: "ping", data: "" }));
+    }
+  }, 20000);
+}
+
+function stopHeartbeat() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
 // WebSocket handlers
 function connectWebsocket() {
+  // Keep exactly one socket: retire the old one without letting its onclose
+  // trigger another reconnect (that used to leave duplicate connections open).
+  clearTimeout(reconnectTimer);
+  if (websocket) {
+    const old = websocket;
+    old.onopen = old.onmessage = old.onclose = old.onerror = null;
+    old.close();
+  }
+  stopHeartbeat();
+
   // Connect websocket
-  const wsUrl = ws_url + "?is_audio=" + is_audio;
-  websocket = new WebSocket(wsUrl);
+  let wsUrl = ws_url + "?is_audio=" + is_audio;
+  if (resumeToken) wsUrl += "&resume=" + encodeURIComponent(resumeToken);
+  const thisSocket = new WebSocket(wsUrl);
+  websocket = thisSocket;
 
   websocket.onopen = function () {
     console.log("WebSocket connection opened.");
     connectionStatus.textContent = "Connected";
     statusDot.classList.add("connected");
+    reconnectAttempts = 0;
+    startHeartbeat();
 
     document.getElementById("sendButton").disabled = false;
     addSubmitHandler();
@@ -35,6 +71,14 @@ function connectWebsocket() {
   websocket.onmessage = function (event) {
     // Parse the incoming message
     const message_from_server = JSON.parse(event.data);
+
+    // Connection housekeeping messages
+    if (message_from_server.session_token) {
+      resumeToken = message_from_server.session_token;
+      return;
+    }
+    if (message_from_server.pong) return;
+
     console.log("[AGENT TO CLIENT] ", message_from_server);
 
     if (
@@ -131,15 +175,23 @@ function connectWebsocket() {
 
   // Handle connection close
   websocket.onclose = function () {
+    // Ignore the close of a socket that has already been replaced
+    if (websocket !== thisSocket) return;
+
     console.log("WebSocket connection closed.");
+    stopHeartbeat();
     document.getElementById("sendButton").disabled = true;
     connectionStatus.textContent = "Disconnected. Reconnecting...";
     statusDot.classList.remove("connected");
     removeTypingIndicator();
-    setTimeout(function () {
+
+    // Reconnect quickly at first, then back off (1s, 2s, 4s ... up to 10s)
+    const delay = Math.min(1000 * 2 ** reconnectAttempts, 10000);
+    reconnectAttempts += 1;
+    reconnectTimer = setTimeout(function () {
       console.log("Reconnecting...");
       connectWebsocket();
-    }, 5000);
+    }, delay);
   };
 
   websocket.onerror = function (e) {
@@ -344,30 +396,45 @@ stopAudioButton.addEventListener("click", () => {
 
   messagesDiv.classList.remove("audio-enabled");
 
-  // Reconnect without audio mode
+  // Reconnect without audio mode (connectWebsocket retires the voice socket)
   is_audio = false;
-
-  // Only reconnect if the connection is still open
-  if (websocket && websocket.readyState === WebSocket.OPEN) {
-    websocket.close();
-  }
+  connectWebsocket();
 });
 
-// Audio recorder handler
+// Audio recorder handler.
+// The microphone worklet produces a tiny chunk every ~8 ms (125 per second).
+// Sending each one as its own message floods the server, so collect about
+// 100 ms of audio (16 kHz, 16-bit = 3200 bytes) and send it as one message.
+const AUDIO_BATCH_BYTES = 3200;
+let pendingAudioChunks = [];
+let pendingAudioBytes = 0;
+
 function audioRecorderHandler(pcmData) {
-  if (!isRecording) return;
+  if (!isRecording) {
+    pendingAudioChunks = [];
+    pendingAudioBytes = 0;
+    return;
+  }
+
+  pendingAudioChunks.push(new Uint8Array(pcmData));
+  pendingAudioBytes += pcmData.byteLength;
+  if (pendingAudioBytes < AUDIO_BATCH_BYTES) return;
+
+  // Join the collected chunks into one buffer
+  const batch = new Uint8Array(pendingAudioBytes);
+  let offset = 0;
+  for (const chunk of pendingAudioChunks) {
+    batch.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  pendingAudioChunks = [];
+  pendingAudioBytes = 0;
 
   // Send the pcm data as base64
   sendMessage({
     mime_type: "audio/pcm",
-    data: arrayBufferToBase64(pcmData),
+    data: arrayBufferToBase64(batch.buffer),
   });
-
-  // Log every few samples to avoid flooding the console
-  if (Math.random() < 0.01) {
-    // Only log ~1% of audio chunks
-    console.log("[CLIENT TO AGENT] sent audio data");
-  }
 }
 
 // Encode an array buffer with Base64

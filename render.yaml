@@ -12,6 +12,9 @@ services:
         value: 3.13.4
       - key: GOOGLE_GENAI_USE_VERTEXAI
         value: FALSE
+      # Show print() output in the logs immediately instead of in delayed batches
+      - key: PYTHONUNBUFFERED
+        value: "1"
       # Public URL of the service; the Google redirect URI is this + /auth/callback
       - key: APP_BASE_URL
         value: https://scheduleaiv1.onrender.com

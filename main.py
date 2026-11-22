@@ -5,7 +5,7 @@ import os
 import traceback
 import uuid
 from pathlib import Path
-from typing import AsyncIterable
+from typing import AsyncIterable, Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
@@ -19,7 +19,12 @@ from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
 from app.event_manager.agent import live_agent, text_agent
-from app.google_auth import REFRESH_TOKEN_KEY, get_refresh_token
+from app.google_auth import (
+    REFRESH_TOKEN_KEY,
+    get_refresh_token,
+    make_resume_token,
+    read_resume_token,
+)
 from app.google_auth import router as auth_router
 
 load_dotenv()
@@ -52,8 +57,11 @@ text_runner = Runner(
 def start_agent_session(session_id, is_audio=False, state=None):
     """Starts an agent session"""
 
-    # Create a Session (state carries this user's Google Calendar login)
-    session = session_service.create_session(
+    # Reuse the session when the page reconnects (keeps the conversation context);
+    # otherwise create one (state carries this user's Google Calendar login)
+    session = session_service.get_session(
+        app_name=APP_NAME, user_id=session_id, session_id=session_id
+    ) or session_service.create_session(
         app_name=APP_NAME,
         user_id=session_id,
         session_id=session_id,
@@ -100,52 +108,55 @@ async def agent_to_client_messaging(
     websocket: WebSocket, live_events: AsyncIterable[Event | None]
 ):
     """Agent to client communication"""
-    while True:
-        async for event in live_events:
-            if event is None:
-                continue
+    # The event stream lasts for the whole session. When it ends (e.g. the Live
+    # API closed the session) this function returns so the connection can be
+    # re-established; looping on an exhausted stream would spin the CPU.
+    async for event in live_events:
+        if event is None:
+            continue
 
-            if event.turn_complete or event.interrupted:
+        if event.turn_complete or event.interrupted:
+            message = {
+                "turn_complete": event.turn_complete,
+                "interrupted": event.interrupted,
+            }
+            await websocket.send_text(json.dumps(message))
+            print(f"[AGENT TO CLIENT]: {message}")
+            continue
+
+        part = event.content and event.content.parts and event.content.parts[0]
+        if not part:
+            continue
+
+        if not isinstance(part, types.Part):
+            continue
+
+        # `part.thought` marks the model's internal reasoning summaries; only
+        # the words it actually speaks (the audio transcript) go to the chat.
+        if part.text and event.partial and not part.thought:
+            message = {
+                "mime_type": "text/plain",
+                "data": part.text,
+                "role": "model",
+            }
+            await websocket.send_text(json.dumps(message))
+            print(f"[AGENT TO CLIENT]: text/plain: {part.text}")
+
+        # If it's audio, send Base64 encoded audio data
+        is_audio = (
+            part.inline_data
+            and part.inline_data.mime_type
+            and part.inline_data.mime_type.startswith("audio/pcm")
+        )
+        if is_audio:
+            audio_data = part.inline_data and part.inline_data.data
+            if audio_data:
                 message = {
-                    "turn_complete": event.turn_complete,
-                    "interrupted": event.interrupted,
-                }
-                await websocket.send_text(json.dumps(message))
-                print(f"[AGENT TO CLIENT]: {message}")
-                continue
-
-            part = event.content and event.content.parts and event.content.parts[0]
-            if not part:
-                continue
-
-            if not isinstance(part, types.Part):
-                continue
-
-            if part.text and event.partial:
-                message = {
-                    "mime_type": "text/plain",
-                    "data": part.text,
+                    "mime_type": "audio/pcm",
+                    "data": base64.b64encode(audio_data).decode("ascii"),
                     "role": "model",
                 }
                 await websocket.send_text(json.dumps(message))
-                print(f"[AGENT TO CLIENT]: text/plain: {part.text}")
-
-            # If it's audio, send Base64 encoded audio data
-            is_audio = (
-                part.inline_data
-                and part.inline_data.mime_type
-                and part.inline_data.mime_type.startswith("audio/pcm")
-            )
-            if is_audio:
-                audio_data = part.inline_data and part.inline_data.data
-                if audio_data:
-                    message = {
-                        "mime_type": "audio/pcm",
-                        "data": base64.b64encode(audio_data).decode("ascii"),
-                        "role": "model",
-                    }
-                    await websocket.send_text(json.dumps(message))
-                    print(f"[AGENT TO CLIENT]: audio/pcm: {len(audio_data)} bytes.")
 
 
 async def client_to_agent_messaging(
@@ -157,8 +168,14 @@ async def client_to_agent_messaging(
         message_json = await websocket.receive_text()
         message = json.loads(message_json)
         mime_type = message["mime_type"]
+
+        # Heartbeat from the page: keeps the connection from going idle
+        if mime_type == "ping":
+            await websocket.send_text(json.dumps({"pong": True}))
+            continue
+
         data = message["data"]
-        role = message.get("role", "user") 
+        role = message.get("role", "user")
 
         # Send the message to the agent
         if mime_type == "text/plain":
@@ -173,7 +190,6 @@ async def client_to_agent_messaging(
             live_request_queue.send_realtime(
                 types.Blob(data=decoded_data, mime_type=mime_type)
             )
-            print(f"[CLIENT TO AGENT]: audio/pcm: {len(decoded_data)} bytes")
 
         else:
             raise ValueError(f"Mime type not supported: {mime_type}")
@@ -181,12 +197,18 @@ async def client_to_agent_messaging(
 
 async def text_chat_messaging(websocket: WebSocket, session_id: str, state: dict):
     """Text mode: one request/response turn per user message."""
-    session = session_service.create_session(
+    # Reuse the session when the page reconnects, so the conversation continues
+    session = session_service.get_session(
+        app_name=APP_NAME, user_id=session_id, session_id=session_id
+    ) or session_service.create_session(
         app_name=APP_NAME, user_id=session_id, session_id=session_id, state=state
     )
 
     while True:
         message = json.loads(await websocket.receive_text())
+        if message.get("mime_type") == "ping":
+            await websocket.send_text(json.dumps({"pong": True}))
+            continue
         if message.get("mime_type") != "text/plain":
             continue
 
@@ -203,7 +225,9 @@ async def text_chat_messaging(websocket: WebSocket, session_id: str, state: dict
             ):
                 if not (event.is_final_response() and event.content and event.content.parts):
                     continue
-                text = "".join(p.text for p in event.content.parts if p.text)
+                text = "".join(
+                    p.text for p in event.content.parts if p.text and not p.thought
+                )
                 if text:
                     await websocket.send_text(
                         json.dumps(
@@ -246,6 +270,7 @@ async def websocket_endpoint(
     websocket: WebSocket,
     session_id: str,
     is_audio: str = Query(...),
+    resume: Optional[str] = Query(None),
 ):
     """Client websocket endpoint"""
 
@@ -258,22 +283,34 @@ async def websocket_endpoint(
 
     await websocket.accept()
 
-    # Use a server-generated id for the chat session instead of the client's
-    # (guessable) one, so users can never end up in each other's sessions.
-    conn_id = uuid.uuid4().hex
     # This visitor's own Google Calendar login, from their encrypted cookie
     refresh_token = get_refresh_token(websocket.cookies)
     state = {REFRESH_TOKEN_KEY: refresh_token} if refresh_token else {}
+
+    # The chat id is server-generated (never the client's guessable one). When the
+    # page reconnects it sends back a resume token that only this server can issue
+    # and that is bound to this user's login, so the conversation continues.
+    resumed_id = read_resume_token(resume, refresh_token)
+    conn_id = resumed_id or uuid.uuid4().hex
+    resumed = resumed_id is not None
+    token = make_resume_token(conn_id, refresh_token)
+    if token:
+        await websocket.send_text(json.dumps({"session_token": token}))
+
+    use_audio = is_audio == "true"
+    # Text and voice keep separate conversation histories
+    chat_id = f"{conn_id}-{'v' if use_audio else 't'}"
     print(
-        f"Client #{session_id} connected as {conn_id[:8]}, audio mode: {is_audio}, "
+        f"Client #{session_id} connected as {conn_id[:8]} ({'voice' if use_audio else 'text'}, "
+        f"resume token {'accepted' if resumed else 'not used'}), "
         f"calendar connected: {bool(refresh_token)}"
     )
 
     try:
-        if is_audio == "true":
+        if use_audio:
             # Voice mode: streaming Live API session
             live_events, live_request_queue = start_agent_session(
-                conn_id, True, state=state
+                chat_id, True, state=state
             )
 
             agent_to_client_task = asyncio.create_task(
@@ -282,10 +319,30 @@ async def websocket_endpoint(
             client_to_agent_task = asyncio.create_task(
                 client_to_agent_messaging(websocket, live_request_queue)
             )
-            await asyncio.gather(agent_to_client_task, client_to_agent_task)
+            # Stop as soon as either side ends, instead of waiting forever on the other
+            done, pending = await asyncio.wait(
+                {agent_to_client_task, client_to_agent_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                error = task.exception()
+                if error:
+                    raise error
+            # The agent's stream ended (e.g. the Live API closed the session):
+            # close so the page reconnects and resumes
+            await websocket.close(code=1011)
         else:
-            await text_chat_messaging(websocket, conn_id, state)
+            await text_chat_messaging(websocket, chat_id, state)
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        print(f"[WS] connection ended by {type(e).__name__}: {e}")
+        traceback.print_exc()
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
 
     print(f"Client #{session_id} disconnected")
